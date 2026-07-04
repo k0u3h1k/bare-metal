@@ -2,7 +2,9 @@ package pull
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/k0u3h1k/bare-metal/pkg/model"
 	"github.com/spf13/cobra"
 )
 
@@ -14,20 +16,24 @@ var Cmd = &cobra.Command{
 Models are stored in ~/.unbound/models/ by default.
 
 Supported formats:
-  - Hugging Face repo IDs: "meta-llama/Llama-3.2-1B"
-  - Short aliases: "llama3.2:1b", "mistral:7b", "codellama:13b"
+  - Built-in aliases: "llama3.2:1b", "mistral:7b", "qwen2:7b", etc.
+  - Full Hugging Face repo IDs: "meta-llama/Llama-3.2-1B-Instruct-GGUF"
+  - Repo + filename: "org/repo:filename.gguf"
 
-Example:
+Examples:
   unbound pull llama3.2:1b
-  unbound pull meta-llama/Llama-3.2-1B-Instruct-GGUF
+  unbound pull mistral:7b
+  unbound pull hugging-quants/Meta-Llama-3.1-8B-Instruct-Q4_K_M-GGUF
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		modelName := args[0]
 
-		fmt.Printf("📥 Pulling model: %s\n", modelName)
-		fmt.Println("   (Model download not yet implemented — this is a placeholder)")
-		fmt.Println("   Future: downloads GGUF files from Hugging Face Hub")
+		mgr := model.NewManager()
+		if err := mgr.Pull(modelName); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return err
+		}
 		return nil
 	},
 }
