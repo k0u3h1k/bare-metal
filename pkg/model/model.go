@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/k0u3h1k/bare-metal/internal/config"
+	"github.com/k0u3h1k/bare-metal/pkg/llama"
 )
 
 // Model represents a downloaded and cached model with metadata.
@@ -20,15 +22,23 @@ type Model struct {
 	IsReady      bool   `json:"is_ready"`
 }
 
-// Manager handles model downloading, caching, and lifecycle.
+// Manager handles model downloading, caching, lifecycle, and inference.
 type Manager struct {
 	cacheDir string
+	binDir   string
+
+	mu           sync.Mutex
+	activeServer *llama.Server
+	activeModel  string
 }
 
 // NewManager creates a new model manager.
 func NewManager() *Manager {
+	home, _ := os.UserHomeDir()
+	dataDir := filepath.Join(home, ".unbound")
 	return &Manager{
 		cacheDir: config.App.ModelDir,
+		binDir:   filepath.Join(dataDir, "bin"),
 	}
 }
 
@@ -48,7 +58,6 @@ func (m *Manager) List() ([]Model, error) {
 			continue
 		}
 
-		// Try to load manifest for rich metadata
 		manifest, err := LoadManifest(m.cacheDir, e.Name())
 		if err == nil && manifest != nil {
 			sizeHuman := fmt.Sprintf("%.1f MB", float64(manifest.SizeBytes)/(1024*1024))
@@ -90,7 +99,6 @@ func (m *Manager) Pull(input string) error {
 	if err != nil {
 		return err
 	}
-
 	return m.DownloadFile(result)
 }
 
@@ -111,7 +119,6 @@ func (m *Manager) Remove(name string) error {
 // GetModelPath returns the path to a cached model file.
 // Returns the first .gguf file found in the model directory.
 func (m *Manager) GetModelPath(name string) (string, error) {
-	// Try manifest first
 	manifest, err := LoadManifest(m.cacheDir, name)
 	if err == nil && manifest.IsReady {
 		return manifest.ModelPath(m.cacheDir), nil
@@ -131,19 +138,105 @@ func (m *Manager) GetModelPath(name string) (string, error) {
 	return "", fmt.Errorf("no model file found in %s", dir)
 }
 
-// Load prepares a model for inference (placeholder for llama.cpp).
-func (m *Manager) Load(name string) error {
+// Load downloads a model if needed, then starts it via llama-server subprocess.
+func (m *Manager) Load(name string, port int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if this model is already loaded
+	if m.activeModel == name && m.activeServer != nil && m.activeServer.IsRunning() {
+		fmt.Printf("✅ Model '%s' is already loaded.\n", name)
+		return nil
+	}
+
+	// Unload any existing model
+	if m.activeServer != nil {
+		if err := m.activeServer.Stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: error stopping previous model: %v\n", err)
+		}
+		m.activeServer = nil
+		m.activeModel = ""
+	}
+
+	// First, ensure the model is downloaded
+	result, err := ResolveModel(name)
+	if err == nil {
+		// Check if already cached
+		manifest, err := LoadManifest(m.cacheDir, result.Alias)
+		if err != nil || !manifest.IsReady {
+			fmt.Println("📥 Model not cached locally. Pulling first...")
+			if err := m.DownloadFile(result); err != nil {
+				return fmt.Errorf("downloading model: %w", err)
+			}
+		}
+	}
+
+	// Find the model file
 	modelPath, err := m.GetModelPath(name)
 	if err != nil {
-		return err
+		return fmt.Errorf("finding model: %w", err)
 	}
-	fmt.Printf("🔧 Loading model '%s' from %s...\n", name, modelPath)
-	fmt.Println("   (llama.cpp integration not yet implemented)")
+
+	// Ensure llama-server binary is available
+	server := llama.NewServer(modelPath)
+	binaryPath, err := server.EnsureBinary(m.binDir)
+	if err != nil {
+		return fmt.Errorf("preparing llama.cpp: %w", err)
+	}
+
+	if port > 0 {
+		server.Port = port
+	} else {
+		server.Port = 8080 // default
+	}
+
+	fmt.Printf("📂 Model file: %s\n", modelPath)
+
+	if err := server.Start(binaryPath); err != nil {
+		return fmt.Errorf("starting model: %w", err)
+	}
+
+	m.activeServer = server
+	m.activeModel = name
 	return nil
 }
 
-// Unload frees a model from memory (placeholder).
+// Unload stops the currently running model.
 func (m *Manager) Unload(name string) error {
-	fmt.Printf("📤 Unloading model '%s' from memory...\n", name)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.activeServer == nil {
+		fmt.Println("No model is currently loaded.")
+		return nil
+	}
+
+	if m.activeModel != "" && m.activeModel != name {
+		fmt.Printf("Different model loaded (%s). Stopping it...\n", m.activeModel)
+	}
+
+	if err := m.activeServer.Stop(); err != nil {
+		return fmt.Errorf("unloading model: %w", err)
+	}
+
+	m.activeServer = nil
+	m.activeModel = ""
 	return nil
+}
+
+// GetServer returns the active llama server instance, if any.
+func (m *Manager) GetServer() *llama.Server {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.activeServer
+}
+
+// GetInferenceURL returns the base URL for the running inference server.
+func (m *Manager) GetInferenceURL() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.activeServer == nil {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d", m.activeServer.Host, m.activeServer.Port)
 }
