@@ -2,20 +2,28 @@ package console
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 )
 
-// RunInteractive starts an interactive terminal chat session with a model.
-// This is a TUI placeholder — will be replaced with Bubble Tea or Charm
-// for a richer terminal experience.
+// Message represents a chat message in the conversation.
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// RunInteractive starts an interactive terminal chat session.
+// This is a simpler version that doesn't connect to an inference server.
 func RunInteractive(modelName string) error {
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Printf("\n━━━ Unbound Interactive Chat — %s ━━━\n", modelName)
 	fmt.Println("Type '/help' for commands, '/exit' to quit.")
-	fmt.Println("Type '/allow ls' to give shell permission, or reply normally to chat.\n")
+	fmt.Println()
 
 	history := []string{}
 
@@ -40,22 +48,137 @@ func RunInteractive(modelName string) error {
 			handleCommand(input)
 		default:
 			history = append(history, input)
-			// TODO: send to model inference and display response
-			fmt.Printf("🤖 %s > (placeholder — model not yet connected)\n", modelName)
+			fmt.Printf("🤖 %s > (placeholder — model not connected)\n", modelName)
 			fmt.Printf("   You said: %s\n", input)
-			fmt.Println("   [Model inference coming soon with llama.cpp bindings]")
 		}
 	}
+}
+
+// RunInteractiveWithInference starts an interactive chat with real inference
+// via the llama-server API.
+func RunInteractiveWithInference(modelName, inferenceURL, systemPrompt string, maxTokens int) error {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Printf("\n━━━ Unbound Interactive Chat — %s ━━━\n", modelName)
+	fmt.Println("Type '/help' for commands, '/exit' to quit.")
+	fmt.Println()
+
+	// Build conversation history
+	var messages []Message
+	if systemPrompt != "" {
+		messages = append(messages, Message{Role: "system", Content: systemPrompt})
+	}
+
+	for {
+		fmt.Print("> ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("read error: %w", err)
+		}
+
+		input = strings.TrimSpace(input)
+
+		switch {
+		case input == "":
+			continue
+		case input == "/exit" || input == "/quit":
+			fmt.Println("Goodbye!")
+			return nil
+		case input == "/help":
+			printHelp()
+		case input == "/clear":
+			messages = []Message{}
+			if systemPrompt != "" {
+				messages = append(messages, Message{Role: "system", Content: systemPrompt})
+			}
+			fmt.Println("🧹 Conversation cleared.")
+			continue
+		case strings.HasPrefix(input, "/"):
+			handleCommand(input)
+			continue
+		}
+
+		// Add user message
+		messages = append(messages, Message{Role: "user", Content: input})
+
+		// Get response from inference server
+		fmt.Print("🤖 ")
+		response, err := chatCompletion(inferenceURL, messages, maxTokens)
+		if err != nil {
+			fmt.Printf("\n⚠️  Error: %v\n", err)
+			// Remove the user message since we couldn't get a response
+			messages = messages[:len(messages)-1]
+			continue
+		}
+
+		fmt.Println()
+		fmt.Println()
+
+		// Add assistant response to history
+		messages = append(messages, Message{Role: "assistant", Content: response})
+	}
+}
+
+// chatCompletion sends a request to the llama-server API and returns the response.
+func chatCompletion(inferenceURL string, messages []Message, maxTokens int) (string, error) {
+	// Convert messages to API format
+	apiMessages := make([]map[string]string, len(messages))
+	for i, msg := range messages {
+		apiMessages[i] = map[string]string{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+	}
+
+	body := map[string]interface{}{
+		"messages":    apiMessages,
+		"max_tokens":  maxTokens,
+		"temperature": 0.7,
+		"stream":      false,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("marshaling request: %w", err)
+	}
+
+	apiURL := inferenceURL + "/v1/chat/completions"
+	resp, err := http.Post(apiURL, "application/json", strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return "", fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decoding response: %w", err)
+	}
+
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("no choices in response")
+	}
+
+	return result.Choices[0].Message.Content, nil
 }
 
 func printHelp() {
 	fmt.Println("\n📖 Commands:")
 	fmt.Println("  /exit, /quit    - Exit the chat")
 	fmt.Println("  /help           - Show this help")
-	fmt.Println("  /allow <cmd>    - Pre-approve a shell command pattern")
-	fmt.Println("  /deny <cmd>     - Deny a shell command pattern")
-	fmt.Println("  /clear          - Clear chat history")
-	fmt.Println("  /history        - Show recent chat history")
+	fmt.Println("  /clear          - Clear conversation history")
+	fmt.Println("  /history        - Show conversation history (TODO)")
 	fmt.Println()
 }
 

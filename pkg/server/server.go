@@ -3,7 +3,11 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
+
+	"github.com/k0u3h1k/bare-metal/pkg/model"
 )
 
 // ChatMessage represents a message in the OpenAI-compatible chat format.
@@ -53,16 +57,21 @@ type ModelInfo struct {
 }
 
 // Start launches the OpenAI-compatible API server.
-// This is a placeholder — actual model inference will be connected later.
-func Start(modelName string, host string, port int) error {
+// Proxies requests to the running llama-server instance.
+func Start(modelName string, host string, port int, inferenceURL string) error {
 	addr := fmt.Sprintf("%s:%d", host, port)
+
+	// If inference URL is not provided, default to local llama-server
+	if inferenceURL == "" {
+		inferenceURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	}
 
 	mux := http.NewServeMux()
 
 	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "model": modelName})
 	})
 
 	// List models
@@ -76,7 +85,7 @@ func Start(modelName string, host string, port int) error {
 		})
 	})
 
-	// Chat completions
+	// Chat completions — proxy to llama-server
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -89,34 +98,70 @@ func Start(modelName string, host string, port int) error {
 			return
 		}
 
-		// TODO: run actual inference via llama.cpp
-		// For now, return a placeholder response
-		resp := ChatCompletionResponse{
-			ID:     "chatcmpl-placeholder",
-			Object: "chat.completion",
-			Model:  req.Model,
-			Choices: []Choice{
-				{
-					Index: 0,
-					Message: ChatMessage{
-						Role:    "assistant",
-						Content: "This is a placeholder response. Model inference not yet implemented.",
-					},
-					FinishReason: "stop",
-				},
-			},
-			Usage: Usage{
-				PromptTokens:     0,
-				CompletionTokens: 0,
-				TotalTokens:      0,
-			},
+		// Check if inference is running
+		mgr := model.NewManager()
+		server := mgr.GetServer()
+		if server == nil || !server.IsRunning() {
+			http.Error(w, `{"error":"no model loaded. Run 'unbound run <model>' first."}`, http.StatusServiceUnavailable)
+			return
 		}
 
+		// Build proxy request to llama-server
+		proxyURL := fmt.Sprintf("%s/v1/chat/completions", inferenceURL)
+		proxyBody, _ := json.Marshal(req)
+
+		if req.Stream {
+			// Streaming: use SSE
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+
+			// We use a direct HTTP client to forward streaming
+			client := &http.Client{}
+			proxyReq, _ := http.NewRequest("POST", proxyURL, strings.NewReader(string(proxyBody)))
+			proxyReq.Header.Set("Content-Type", "application/json")
+
+			resp, err := client.Do(proxyReq)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("proxy error: %v", err), http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
+
+			// Forward the SSE stream
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming not supported", http.StatusInternalServerError)
+				return
+			}
+
+			io.Copy(w, resp.Body)
+			flusher.Flush()
+			return
+		}
+
+		// Non-streaming: proxy and return response
+		resp, err := http.Post(proxyURL, "application/json", strings.NewReader(string(proxyBody)))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("inference error: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+
+		// Check if llama-server returned an error
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			w.WriteHeader(resp.StatusCode)
+			w.Write(body)
+			return
+		}
+
+		io.Copy(w, resp.Body)
 	})
 
-	// List models endpoint (OpenAI compatible)
+	// Ollama-compatible tags endpoint
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -126,12 +171,13 @@ func Start(modelName string, host string, port int) error {
 		})
 	})
 
-	fmt.Printf("🌐 API server listening on %s\n", addr)
+	fmt.Printf("🌐 Unbound API server listening on %s\n", addr)
 	fmt.Println("📋 Endpoints:")
 	fmt.Println("   GET  /health                - Health check")
 	fmt.Println("   GET  /v1/models             - List models")
-	fmt.Println("   POST /v1/chat/completions   - Chat completion")
+	fmt.Println("   POST /v1/chat/completions   - Chat completion (proxied)")
 	fmt.Println("   GET  /api/tags              - Ollama-compatible model list")
+	fmt.Printf("📎 Proxying inference to: %s\n", inferenceURL)
 
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		return fmt.Errorf("server error: %w", err)
