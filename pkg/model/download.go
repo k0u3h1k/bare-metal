@@ -24,6 +24,8 @@ const (
 	hfAPIBase = "https://huggingface.co"
 	// hfDownloadBase is the Hugging Face file download base.
 	hfDownloadBase = "https://huggingface.co"
+	// statePathSuffix is the suffix for the download state file (used only for resumability metadata).
+	statePathSuffix = ".state"
 )
 
 // downloadState tracks partial download progress for resumability.
@@ -34,9 +36,9 @@ type downloadState struct {
 }
 
 // DownloadFile downloads a model file from Hugging Face with:
-// - Concurrent chunked downloads
+// - Concurrent chunked downloads streaming to disk
 // - Progress bar display
-// - Resume support (HTTP Range)
+// - Resume support (HTTP Range + .part file)
 // - SHA256 verification
 func (m *Manager) DownloadFile(result *ResolveResult) error {
 	manifest := &Manifest{
@@ -60,9 +62,7 @@ func (m *Manager) DownloadFile(result *ResolveResult) error {
 		return err
 	}
 
-	// Resolve the filename against the repository. GGUF repositories frequently
-	// normalize filenames (for example, lowercase with underscores), so a stale
-	// alias filename must not produce an opaque 404.
+	// Resolve the filename against the repository.
 	filename, err := resolveFilename(result.RepoID, result.Filename)
 	if err != nil {
 		return fmt.Errorf("resolving model file: %w", err)
@@ -119,56 +119,53 @@ func (m *Manager) DownloadFile(result *ResolveResult) error {
 // resolveFilename verifies an explicit filename with Hugging Face and selects a
 // compatible GGUF file when the alias filename has changed.
 func resolveFilename(repoID, requested string) (string, error) {
-if requested == "" {
-return "", fmt.Errorf("repository %q has no configured GGUF filename", repoID)
-}
-apiURL := fmt.Sprintf("%s/api/models/%s", hfAPIBase, repoID)
-client := &http.Client{Timeout: 30 * time.Second}
-resp, err := client.Get(apiURL)
-if err != nil {
-return "", fmt.Errorf("querying repository: %w", err)
-}
-defer resp.Body.Close()
-if resp.StatusCode != http.StatusOK {
-return "", fmt.Errorf("repository API returned HTTP %d", resp.StatusCode)
-}
-var metadata struct { Siblings []struct { Filename string `json:"rfilename"` } `json:"siblings"` }
-if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
-return "", fmt.Errorf("decoding repository metadata: %w", err)
-}
-for _, sibling := range metadata.Siblings {
-if sibling.Filename == requested { return requested, nil }
-}
-requestedLower := strings.ToLower(requested)
-for _, sibling := range metadata.Siblings {
-name := strings.ToLower(sibling.Filename)
-if strings.HasSuffix(name, ".gguf") && (name == requestedLower || strings.ReplaceAll(name, "_", "-") == strings.ReplaceAll(requestedLower, "_", "-")) {
-return sibling.Filename, nil
-}
-}
-for _, sibling := range metadata.Siblings {
-if strings.HasSuffix(strings.ToLower(sibling.Filename), ".gguf") && strings.Contains(strings.ToLower(sibling.Filename), "q4_k_m") {
-return sibling.Filename, nil
-}
-}
-return "", fmt.Errorf("file %q not found in repository", requested)
+	if requested == "" {
+		return "", fmt.Errorf("repository %q has no configured GGUF filename", repoID)
+	}
+	apiURL := fmt.Sprintf("%s/api/models/%s", hfAPIBase, repoID)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return "", fmt.Errorf("querying repository: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("repository API returned HTTP %d", resp.StatusCode)
+	}
+	var metadata struct {
+		Siblings []struct {
+			Filename string `json:"rfilename"`
+		} `json:"siblings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return "", fmt.Errorf("decoding repository metadata: %w", err)
+	}
+	for _, sibling := range metadata.Siblings {
+		if sibling.Filename == requested {
+			return requested, nil
+		}
+	}
+	requestedLower := strings.ToLower(requested)
+	for _, sibling := range metadata.Siblings {
+		name := strings.ToLower(sibling.Filename)
+		if strings.HasSuffix(name, ".gguf") && (name == requestedLower || strings.ReplaceAll(name, "_", "-") == strings.ReplaceAll(requestedLower, "_", "-")) {
+			return sibling.Filename, nil
+		}
+	}
+	for _, sibling := range metadata.Siblings {
+		if strings.HasSuffix(strings.ToLower(sibling.Filename), ".gguf") && strings.Contains(strings.ToLower(sibling.Filename), "q4_k_m") {
+			return sibling.Filename, nil
+		}
+	}
+	return "", fmt.Errorf("file %q not found in repository", requested)
 }
 
 // downloadWithProgress handles the actual download with progress bar.
 func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 	modelPath := manifest.ModelPath(m.cacheDir)
 	partPath := manifest.PartPath(m.cacheDir)
-	statePath := manifest.StatePath(m.cacheDir)
 
-	// Check for existing partial download
-	var resumeBytes int64
-	if state, err := loadState(statePath); err == nil {
-		resumeBytes = state.Downloaded
-		fmt.Printf("   Resuming download at %.1f MB...\n", float64(resumeBytes)/(1024*1024))
-	}
-
-	// Get file size and check if we already have the complete file
-	// We do a HEAD request first
+	// Get file size via HEAD request
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Head(url)
 	if err != nil {
@@ -176,7 +173,7 @@ func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 	}
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d from Hugging Face for %s", resp.StatusCode, url)
 	}
 
@@ -200,27 +197,21 @@ func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 		return nil
 	}
 
-	// Determine start point (for resume)
+	// Check for existing partial download to resume
 	var startOffset int64
-	if resumeBytes > 0 {
-		startOffset = resumeBytes
-	}
-
-	// Open or create the partial file
-	partFile, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("creating partial file: %w", err)
-	}
-	defer partFile.Close()
-
-	// Seek to the resume position
-	if startOffset > 0 {
-		if _, err := partFile.Seek(startOffset, io.SeekStart); err != nil {
-			return fmt.Errorf("seeking to resume position: %w", err)
+	if info, err := os.Stat(partPath); err == nil {
+		startOffset = info.Size()
+		if startOffset > 0 && startOffset < totalSize {
+			fmt.Printf("   Resuming download at %.1f MB...\n", float64(startOffset)/(1024*1024))
+		} else if startOffset >= totalSize {
+			// Part file is already complete, just rename
+			os.Rename(partPath, modelPath)
+			fmt.Println("   File already downloaded and complete.")
+			return nil
 		}
 	}
 
-	// Download in chunks concurrently
+	// Download in chunks concurrently, streaming each to disk
 	remaining := totalSize - startOffset
 	numChunks := int(remaining / chunkSize)
 	if remaining%chunkSize != 0 {
@@ -233,10 +224,8 @@ func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 		numChunks = 1
 	}
 
-	chunkSizeActual := remaining / int64(numChunks)
-	if remaining%int64(numChunks) != 0 {
-		chunkSizeActual++
-	}
+	// Calculate actual chunk size per goroutine
+	chunkSizeActual := (remaining + int64(numChunks) - 1) / int64(numChunks)
 
 	// Track downloaded bytes
 	var downloaded int64
@@ -244,7 +233,28 @@ func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, numChunks)
 
+	// Open the partial file for writing at offsets
+	partFile, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("creating partial file: %w", err)
+	}
+	defer partFile.Close()
+
+	// If resuming, ensure the file is the right size for WriteAt
+	if startOffset > 0 {
+		if err := partFile.Truncate(startOffset); err != nil {
+			return fmt.Errorf("truncating partial file: %w", err)
+		}
+	}
+	// Ensure file is large enough for WriteAt operations
+	if err := partFile.Truncate(totalSize); err != nil {
+		return fmt.Errorf("extending partial file: %w", err)
+	}
+
+	// Progress bar
 	progress := newProgressBar(totalSize, startOffset)
+	var progressMu sync.Mutex
+	lastProgressUpdate := time.Now()
 
 	for i := 0; i < numChunks; i++ {
 		wg.Add(1)
@@ -256,22 +266,30 @@ func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 
 		go func(offset, end int64) {
 			defer wg.Done()
-			data, err := downloadRange(url, offset, end)
-			if err != nil {
-				errChan <- fmt.Errorf("chunk %d-%d: %w", offset, end, err)
-				return
+			// Retry with backoff
+			var lastErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				if attempt > 0 {
+					backoff := time.Duration(1<<attempt) * time.Second
+					time.Sleep(backoff)
+				}
+				lastErr = downloadChunkToFile(partFile, url, offset, end)
+				if lastErr == nil {
+					chunkSize := end - offset + 1
+					mu.Lock()
+					downloaded += chunkSize
+					// Throttle progress updates to at most every 200ms
+					if time.Since(lastProgressUpdate) > 200*time.Millisecond {
+						progressMu.Lock()
+						progress.update(downloaded)
+						progressMu.Unlock()
+						lastProgressUpdate = time.Now()
+					}
+					mu.Unlock()
+					return
+				}
 			}
-
-			mu.Lock()
-			// Write chunk at the correct position
-			if _, err := partFile.WriteAt(data, offset); err != nil {
-				mu.Unlock()
-				errChan <- fmt.Errorf("writing chunk at %d: %w", offset, err)
-				return
-			}
-			downloaded += int64(len(data))
-			progress.update(downloaded)
-			mu.Unlock()
+			errChan <- fmt.Errorf("chunk %d-%d after 3 retries: %w", offset, end, lastErr)
 		}(offset, end)
 	}
 
@@ -285,6 +303,7 @@ func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 		}
 	}
 
+	// Final progress update
 	progress.done()
 
 	// Rename partial file to final
@@ -296,61 +315,53 @@ func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 	return nil
 }
 
-// downloadRange downloads a specific byte range from a URL.
-func downloadRange(url string, start, end int64) ([]byte, error) {
+// downloadChunkToFile streams a byte range from a URL directly to a file at the given offset.
+// Uses a fixed 32KB buffer per request to keep memory usage low.
+func downloadChunkToFile(f *os.File, url string, start, end int64) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	req.Header.Set("User-Agent", "unbound-cli/0.1.0")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("HTTP %d for range %d-%d", resp.StatusCode, start, end)
+		return fmt.Errorf("HTTP %d for range %d-%d", resp.StatusCode, start, end)
 	}
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	// Stream directly to file at offset using a 32KB buffer
+	buf := make([]byte, 32*1024)
+	written := int64(0)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := f.WriteAt(buf[:n], start+written); writeErr != nil {
+				return fmt.Errorf("writing at offset %d: %w", start+written, writeErr)
+			}
+			written += int64(n)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading response body: %w", readErr)
+		}
 	}
 
 	expectedLen := end - start + 1
-	if int64(len(data)) != expectedLen {
-		return nil, fmt.Errorf("expected %d bytes, got %d", expectedLen, len(data))
+	if written != expectedLen {
+		return fmt.Errorf("expected %d bytes, got %d", expectedLen, written)
 	}
 
-	return data, nil
-}
-
-// loadState reads download state from disk.
-func loadState(path string) (*downloadState, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var state downloadState
-	// Simple parsing: first line is total_size, second line is downloaded
-	lines := strings.SplitN(string(data), "\n", 2)
-	if len(lines) < 2 {
-		return nil, fmt.Errorf("invalid state file")
-	}
-	fmt.Sscanf(lines[0], "%d", &state.TotalSize)
-	fmt.Sscanf(lines[1], "%d", &state.Downloaded)
-	return &state, nil
-}
-
-// saveState persists download state to disk.
-func (m *Manager) saveState(path string, totalSize, downloaded int64) error {
-	data := fmt.Sprintf("%d\n%d\n", totalSize, downloaded)
-	return os.WriteFile(path, []byte(data), 0644)
+	return nil
 }
 
 // verifySHA256 checks that a file matches the expected SHA256 hash.

@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,10 +40,13 @@ type Server struct {
 	Threads   int
 	GPULayers int
 	CtxSize   int
+	FlashAttn bool // enable flash attention (may not be supported by all builds)
 
 	cmd      *exec.Cmd
 	binDir   string
 	isOwnBin bool // whether we downloaded the binary ourselves
+	stopped  bool // guard for idempotent Stop
+	stopMu   sync.Mutex
 }
 
 // NewServer creates a new llama.cpp server manager.
@@ -129,8 +134,10 @@ func (s *Server) Start(binaryPath string) error {
 		args = append(args, "-ngl", fmt.Sprintf("%d", s.GPULayers))
 	}
 
-	// Also support flash attention if available
-	args = append(args, "--flash-attn")
+	// Only add flash attention if the build supports it
+	if s.FlashAttn {
+		args = append(args, "--flash-attn")
+	}
 
 	fmt.Printf("🔧 Starting llama-server with %s...\n", filepath.Base(s.ModelPath))
 	s.cmd = exec.Command(binaryPath, args...)
@@ -164,8 +171,16 @@ func (s *Server) Start(binaryPath string) error {
 }
 
 // Stop gracefully shuts down the llama-server process.
+// It is idempotent and safe to call multiple times.
 func (s *Server) Stop() error {
+	s.stopMu.Lock()
+	defer s.stopMu.Unlock()
+
+	if s.stopped {
+		return nil
+	}
 	if s.cmd == nil || s.cmd.Process == nil {
+		s.stopped = true
 		return nil
 	}
 
@@ -181,12 +196,14 @@ func (s *Server) Stop() error {
 	// Force kill if still running
 	if s.cmd.ProcessState == nil || !s.cmd.ProcessState.Exited() {
 		if err := s.cmd.Process.Kill(); err != nil {
+			s.stopped = true
 			return fmt.Errorf("killing llama-server: %w", err)
 		}
 	}
 
-	// Wait for process to exit
+	// Wait for process to exit. cmd.Wait() is single-use; guard with stopped flag.
 	s.cmd.Wait()
+	s.stopped = true
 	fmt.Println("🛑 llama-server stopped.")
 	return nil
 }
@@ -198,6 +215,18 @@ func (s *Server) IsRunning() bool {
 	}
 	// Check if process has exited
 	return s.cmd.ProcessState == nil || !s.cmd.ProcessState.Exited()
+}
+
+// FreePort finds a free TCP port by binding to :0 and returning the assigned port.
+// The listener is closed before returning so the caller can bind it.
+func FreePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("finding free port: %w", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return port, nil
 }
 
 // Health checks if the server responds.
