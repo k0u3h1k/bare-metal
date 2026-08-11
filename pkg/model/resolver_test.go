@@ -11,7 +11,7 @@ func TestResolveModel_Alias(t *testing.T) {
 		wantFile string
 		wantErr  bool
 	}{
-		{"llama3.2:1b", "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF", "Llama-3.2-1B-Instruct-Q4_K_M.gguf", false},
+		{"llama3.2:1b", "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF", "llama-3.2-1b-instruct-q4_k_m.gguf", false},
 		{"mistral:7b", "MaziyarPanahi/Mistral-7B-Instruct-v0.3-GGUF", "Mistral-7B-Instruct-v0.3.Q4_K_M.gguf", false},
 		{"llama3.2:3b", "hugging-quants/Llama-3.2-3B-Instruct-Q4_K_M-GGUF", "Llama-3.2-3B-Instruct-Q4_K_M.gguf", false},
 		{"qwen2:7b", "hugging-quants/Qwen2.5-7B-Instruct-Q4_K_M-GGUF", "Qwen2.5-7B-Instruct-Q4_K_M.gguf", false},

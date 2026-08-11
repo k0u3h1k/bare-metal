@@ -108,7 +108,11 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 
 		// Build proxy request to llama-server
 		proxyURL := fmt.Sprintf("%s/v1/chat/completions", inferenceURL)
-		proxyBody, _ := json.Marshal(req)
+		proxyBody, err := json.Marshal(req)
+                if err != nil {
+                        http.Error(w, fmt.Sprintf("encode request: %v", err), http.StatusInternalServerError)
+                        return
+                }
 
 		if req.Stream {
 			// Streaming: use SSE
@@ -118,7 +122,11 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 
 			// We use a direct HTTP client to forward streaming
 			client := &http.Client{}
-			proxyReq, _ := http.NewRequest("POST", proxyURL, strings.NewReader(string(proxyBody)))
+			proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, proxyURL, strings.NewReader(string(proxyBody)))
+			if err != nil {
+				http.Error(w, fmt.Sprintf("proxy request: %v", err), http.StatusBadGateway)
+				return
+			}
 			proxyReq.Header.Set("Content-Type", "application/json")
 
 			resp, err := client.Do(proxyReq)
@@ -135,7 +143,9 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 				return
 			}
 
-			io.Copy(w, resp.Body)
+			if _, err := io.Copy(w, resp.Body); err != nil {
+				return
+			}
 			flusher.Flush()
 			return
 		}
@@ -158,7 +168,9 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 			return
 		}
 
-		io.Copy(w, resp.Body)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			return
+		}
 	})
 
 	// Ollama-compatible tags endpoint

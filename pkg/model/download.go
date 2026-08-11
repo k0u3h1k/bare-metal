@@ -3,6 +3,7 @@ package model
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,8 +60,17 @@ func (m *Manager) DownloadFile(result *ResolveResult) error {
 		return err
 	}
 
+	// Resolve the filename against the repository. GGUF repositories frequently
+	// normalize filenames (for example, lowercase with underscores), so a stale
+	// alias filename must not produce an opaque 404.
+	filename, err := resolveFilename(result.RepoID, result.Filename)
+	if err != nil {
+		return fmt.Errorf("resolving model file: %w", err)
+	}
+	manifest.Filename = filename
+
 	// Build download URL
-	downloadURL := fmt.Sprintf("%s/%s/resolve/main/%s", hfDownloadBase, result.RepoID, result.Filename)
+	downloadURL := fmt.Sprintf("%s/%s/resolve/main/%s", hfDownloadBase, result.RepoID, filename)
 	fmt.Printf("\n📥 Downloading %s\n", result.Alias)
 	fmt.Printf("   From: %s\n", downloadURL)
 	if result.Params != "" {
@@ -101,6 +111,44 @@ func (m *Manager) DownloadFile(result *ResolveResult) error {
 	fmt.Printf("\n✅ Download complete! (%s, %.1f MB)\n", manifest.Filename, sizeMB)
 
 	return nil
+}
+
+// resolveFilename verifies an explicit filename with Hugging Face and selects a
+// compatible GGUF file when the alias filename has changed.
+func resolveFilename(repoID, requested string) (string, error) {
+if requested == "" {
+return "", fmt.Errorf("repository %q has no configured GGUF filename", repoID)
+}
+apiURL := fmt.Sprintf("%s/api/models/%s", hfAPIBase, repoID)
+client := &http.Client{Timeout: 30 * time.Second}
+resp, err := client.Get(apiURL)
+if err != nil {
+return "", fmt.Errorf("querying repository: %w", err)
+}
+defer resp.Body.Close()
+if resp.StatusCode != http.StatusOK {
+return "", fmt.Errorf("repository API returned HTTP %d", resp.StatusCode)
+}
+var metadata struct { Siblings []struct { Filename string `json:"rfilename"` } `json:"siblings"` }
+if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+return "", fmt.Errorf("decoding repository metadata: %w", err)
+}
+for _, sibling := range metadata.Siblings {
+if sibling.Filename == requested { return requested, nil }
+}
+requestedLower := strings.ToLower(requested)
+for _, sibling := range metadata.Siblings {
+name := strings.ToLower(sibling.Filename)
+if strings.HasSuffix(name, ".gguf") && (name == requestedLower || strings.ReplaceAll(name, "_", "-") == strings.ReplaceAll(requestedLower, "_", "-")) {
+return sibling.Filename, nil
+}
+}
+for _, sibling := range metadata.Siblings {
+if strings.HasSuffix(strings.ToLower(sibling.Filename), ".gguf") && strings.Contains(strings.ToLower(sibling.Filename), "q4_k_m") {
+return sibling.Filename, nil
+}
+}
+return "", fmt.Errorf("file %q not found in repository", requested)
 }
 
 // downloadWithProgress handles the actual download with progress bar.
