@@ -6,6 +6,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/k0u3h1k/bare-metal/pkg/llama"
+
 	"net"
 
 	"github.com/k0u3h1k/bare-metal/pkg/console"
@@ -42,7 +44,11 @@ Examples:
 		// Load the model (download if needed, start llama-server)
 		loadPort := port
 		if loadPort == 0 {
-			loadPort = 8080
+			var portErr error
+			loadPort, portErr = llama.FreePort()
+			if portErr != nil {
+				return fmt.Errorf("selecting llama port: %w", portErr)
+			}
 		}
 
 		if err := mgr.Load(modelName, loadPort); err != nil {
@@ -56,6 +62,10 @@ Examples:
 			return fmt.Errorf("inference server not available")
 		}
 
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(stop)
+		go func() { <-stop; _ = mgr.Unload(modelName); os.Exit(0) }()
 		fmt.Printf("💬 Starting interactive chat (inference at %s)\n", inferenceURL)
 		if autoApprove {
 			fmt.Println("🔓 Auto-approving all permission requests (--auto-approve)")
@@ -64,7 +74,11 @@ Examples:
 				return fmt.Errorf("enabling unrestricted mode: %w", err)
 			}
 			defer func() {
-				if existed { _ = os.Setenv("UNBOUND_ALLOW_ALL", previous) } else { _ = os.Unsetenv("UNBOUND_ALLOW_ALL") }
+				if existed {
+					_ = os.Setenv("UNBOUND_ALLOW_ALL", previous)
+				} else {
+					_ = os.Unsetenv("UNBOUND_ALLOW_ALL")
+				}
 			}()
 		}
 		if systemPrompt != "" {
@@ -89,11 +103,4 @@ func init() {
 	Cmd.Flags().StringP("system-prompt", "s", "", "Custom system prompt for the model")
 	Cmd.Flags().IntP("max-tokens", "m", 2048, "Maximum tokens per response")
 	Cmd.Flags().IntP("port", "p", 0, "Port for llama-server (default: 0 = auto-select)")
-}
-
-func freePort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil { return 0, err }
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
 }
