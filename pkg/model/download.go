@@ -106,7 +106,10 @@ func (m *Manager) DownloadFile(result *ResolveResult) error {
 	os.Remove(manifest.StatePath(m.cacheDir))
 
 	// Calculate and display final size
-	info, _ := os.Stat(manifest.ModelPath(m.cacheDir))
+	info, err := os.Stat(manifest.ModelPath(m.cacheDir))
+	if err != nil {
+		return fmt.Errorf("stat downloaded model: %w", err)
+	}
 	sizeMB := float64(info.Size()) / (1024 * 1024)
 	fmt.Printf("\n✅ Download complete! (%s, %.1f MB)\n", manifest.Filename, sizeMB)
 

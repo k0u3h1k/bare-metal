@@ -34,7 +34,10 @@ type Manager struct {
 
 // NewManager creates a new model manager.
 func NewManager() *Manager {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
 	dataDir := filepath.Join(home, ".unbound")
 	return &Manager{
 		cacheDir: config.App.ModelDir,
