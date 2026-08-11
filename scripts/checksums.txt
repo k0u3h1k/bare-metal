@@ -1,0 +1,5 @@
+# Unbound v0.1.0 checksums (SHA256)
+# Usage: sha256sum -c checksums.txt
+7a7f8688ad4fc7e59ecf87e0935444af5224af5297c9d159ed0145fd983cb475  unbound-linux-amd64
+2a07cf7cb14f4138081446d2202002acafbb4dde0a84bb9142522968113a1792  unbound-darwin-amd64
+edc16f66a47f00d223f9a0bf4fe9d87f10f2d0632e0de31e63a2820bc0063133  unbound-darwin-arm64
