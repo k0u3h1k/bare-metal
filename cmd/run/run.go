@@ -8,8 +8,6 @@ import (
 
 	"github.com/k0u3h1k/bare-metal/pkg/llama"
 
-	"net"
-
 	"github.com/k0u3h1k/bare-metal/pkg/console"
 	"github.com/k0u3h1k/bare-metal/pkg/model"
 	"github.com/spf13/cobra"
