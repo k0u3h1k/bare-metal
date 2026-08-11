@@ -54,8 +54,14 @@ Examples:
 
 		fmt.Printf("💬 Starting interactive chat (inference at %s)\n", inferenceURL)
 		if noPerms {
-			fmt.Println("🔓 Running in sandboxed mode (--no-permissions)")
-			os.Setenv("UNBOUND_ALLOW_ALL", "1")
+			fmt.Println("🔓 Running with permissions enabled (--no-permissions)")
+			previous, existed := os.LookupEnv("UNBOUND_ALLOW_ALL")
+			if err := os.Setenv("UNBOUND_ALLOW_ALL", "1"); err != nil {
+				return fmt.Errorf("enabling unrestricted mode: %w", err)
+			}
+			defer func() {
+				if existed { _ = os.Setenv("UNBOUND_ALLOW_ALL", previous) } else { _ = os.Unsetenv("UNBOUND_ALLOW_ALL") }
+			}()
 		}
 		if systemPrompt != "" {
 			fmt.Printf("📝 System prompt: %s\n", systemPrompt)
