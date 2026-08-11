@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -17,7 +18,7 @@ type ModelAlias struct {
 // Users can also specify full HF repo IDs directly.
 var builtinAliases = map[string]ModelAlias{
 	// Llama 3.2 (Meta)
-	"llama3.2:1b": {RepoID: "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF", DefaultFile: "Llama-3.2-1B-Instruct-Q4_K_M.gguf", Params: "1B", Quantization: "Q4_K_M"},
+	"llama3.2:1b": {RepoID: "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF", DefaultFile: "llama-3.2-1b-instruct-q4_k_m.gguf", Params: "1B", Quantization: "Q4_K_M"},
 	"llama3.2:3b": {RepoID: "hugging-quants/Llama-3.2-3B-Instruct-Q4_K_M-GGUF", DefaultFile: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", Params: "3B", Quantization: "Q4_K_M"},
 
 	// Llama 3.1 (Meta)
@@ -111,5 +112,6 @@ func ListBuiltinAliases() []string {
 	for name := range builtinAliases {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
