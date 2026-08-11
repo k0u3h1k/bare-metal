@@ -69,7 +69,7 @@ main() {
 
     [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir" 2>/dev/null || { echo "Cannot create ${dir}"; exit 1; }
 
-    local tmp; tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+    local tmp; tmp=$(mktemp); trap 'rm -f "${tmp:-}"' EXIT
     echo "Downloading ${BIN} ${VERSION}..."
     if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" -o "$tmp"
     elif command -v wget >/dev/null 2>&1; then wget -q "$url" -O "$tmp"
