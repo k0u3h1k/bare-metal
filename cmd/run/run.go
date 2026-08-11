@@ -3,6 +3,10 @@ package run
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"net"
 
 	"github.com/k0u3h1k/bare-metal/pkg/console"
 	"github.com/k0u3h1k/bare-metal/pkg/model"
@@ -26,7 +30,7 @@ Examples:
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		modelName := args[0]
-		noPerms, _ := cmd.Flags().GetBool("no-permissions")
+		autoApprove, _ := cmd.Flags().GetBool("auto-approve")
 		systemPrompt, _ := cmd.Flags().GetString("system-prompt")
 		maxTokens, _ := cmd.Flags().GetInt("max-tokens")
 		port, _ := cmd.Flags().GetInt("port")
@@ -53,8 +57,8 @@ Examples:
 		}
 
 		fmt.Printf("💬 Starting interactive chat (inference at %s)\n", inferenceURL)
-		if noPerms {
-			fmt.Println("🔓 Running with permissions enabled (--no-permissions)")
+		if autoApprove {
+			fmt.Println("🔓 Auto-approving all permission requests (--auto-approve)")
 			previous, existed := os.LookupEnv("UNBOUND_ALLOW_ALL")
 			if err := os.Setenv("UNBOUND_ALLOW_ALL", "1"); err != nil {
 				return fmt.Errorf("enabling unrestricted mode: %w", err)
@@ -81,8 +85,15 @@ Examples:
 }
 
 func init() {
-	Cmd.Flags().BoolP("no-permissions", "n", false, "Run in sandboxed mode (no permissions)")
+	Cmd.Flags().BoolP("auto-approve", "a", false, "Skip permission prompts (auto-approve all actions for this session)")
 	Cmd.Flags().StringP("system-prompt", "s", "", "Custom system prompt for the model")
 	Cmd.Flags().IntP("max-tokens", "m", 2048, "Maximum tokens per response")
-	Cmd.Flags().IntP("port", "p", 0, "Port for llama-server (default: 8080)")
+	Cmd.Flags().IntP("port", "p", 0, "Port for llama-server (default: 0 = auto-select)")
+}
+
+func freePort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil { return 0, err }
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port, nil
 }

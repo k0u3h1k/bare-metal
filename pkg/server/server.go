@@ -1,13 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/k0u3h1k/bare-metal/pkg/model"
 )
 
 // ChatMessage represents a message in the OpenAI-compatible chat format.
@@ -85,93 +86,44 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 		})
 	})
 
-	// Chat completions — proxy to llama-server
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req ChatCompletionRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		// Check if inference is running
-		mgr := model.NewManager()
-		server := mgr.GetServer()
-		if server == nil || !server.IsRunning() {
-			http.Error(w, `{"error":"no model loaded. Run 'unbound run <model>' first."}`, http.StatusServiceUnavailable)
-			return
-		}
-
-		// Build proxy request to llama-server
-		proxyURL := fmt.Sprintf("%s/v1/chat/completions", inferenceURL)
-		proxyBody, err := json.Marshal(req)
-                if err != nil {
-                        http.Error(w, fmt.Sprintf("encode request: %v", err), http.StatusInternalServerError)
-                        return
-                }
-
-		if req.Stream {
-			// Streaming: use SSE
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
-
-			// We use a direct HTTP client to forward streaming
-			client := &http.Client{}
-			proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, proxyURL, strings.NewReader(string(proxyBody)))
-			if err != nil {
-				http.Error(w, fmt.Sprintf("proxy request: %v", err), http.StatusBadGateway)
-				return
-			}
-			proxyReq.Header.Set("Content-Type", "application/json")
-
-			resp, err := client.Do(proxyReq)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("proxy error: %v", err), http.StatusBadGateway)
-				return
-			}
-			defer resp.Body.Close()
-
-			// Forward the SSE stream
-			flusher, ok := w.(http.Flusher)
-			if !ok {
-				http.Error(w, "streaming not supported", http.StatusInternalServerError)
-				return
-			}
-
-			if _, err := io.Copy(w, resp.Body); err != nil {
-				return
-			}
-			flusher.Flush()
-			return
-		}
-
-		// Non-streaming: proxy and return response
-		resp, err := http.Post(proxyURL, "application/json", strings.NewReader(string(proxyBody)))
-		if err != nil {
-			http.Error(w, fmt.Sprintf("inference error: %v", err), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		w.Header().Set("Content-Type", "application/json")
-
-		// Check if llama-server returned an error
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			w.WriteHeader(resp.StatusCode)
-			w.Write(body)
-			return
-		}
-
-		if _, err := io.Copy(w, resp.Body); err != nil {
-			return
-		}
-	})
+    // Chat completions — proxy to llama-server.
+    mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+            http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+        body, err := io.ReadAll(r.Body)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("read request: %v", err), http.StatusBadRequest)
+            return
+        }
+        var req struct { Stream bool `json:"stream"` }
+        if err := json.Unmarshal(body, &req); err != nil {
+            http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
+            return
+        }
+        proxyURL := fmt.Sprintf("%s/v1/chat/completions", strings.TrimRight(inferenceURL, "/"))
+        proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, proxyURL, bytes.NewReader(body))
+        if err != nil {
+            http.Error(w, fmt.Sprintf("proxy request: %v", err), http.StatusBadGateway)
+            return
+        }
+        proxyReq.Header.Set("Content-Type", "application/json")
+        client := &http.Client{Timeout: 10 * time.Minute}
+        resp, err := client.Do(proxyReq)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("inference error: %v", err), http.StatusBadGateway)
+            return
+        }
+        defer resp.Body.Close()
+        for key, values := range resp.Header {
+            if key == "Content-Length" { continue }
+            for _, value := range values { w.Header().Add(key, value) }
+        }
+        w.WriteHeader(resp.StatusCode)
+        if _, err := io.Copy(w, resp.Body); err != nil { return }
+        _ = req.Stream // stream responses are forwarded unchanged, including SSE.
+    })
 
 	// Ollama-compatible tags endpoint
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
