@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
 )
 
 // ChatMessage represents a message in the OpenAI-compatible chat format.
@@ -86,44 +85,52 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 		})
 	})
 
-    // Chat completions — proxy to llama-server.
-    mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-        if r.Method != http.MethodPost {
-            http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-            return
-        }
-        body, err := io.ReadAll(r.Body)
-        if err != nil {
-            http.Error(w, fmt.Sprintf("read request: %v", err), http.StatusBadRequest)
-            return
-        }
-        var req struct { Stream bool `json:"stream"` }
-        if err := json.Unmarshal(body, &req); err != nil {
-            http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
-            return
-        }
-        proxyURL := fmt.Sprintf("%s/v1/chat/completions", strings.TrimRight(inferenceURL, "/"))
-        proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, proxyURL, bytes.NewReader(body))
-        if err != nil {
-            http.Error(w, fmt.Sprintf("proxy request: %v", err), http.StatusBadGateway)
-            return
-        }
-        proxyReq.Header.Set("Content-Type", "application/json")
-        client := &http.Client{Timeout: 10 * time.Minute}
-        resp, err := client.Do(proxyReq)
-        if err != nil {
-            http.Error(w, fmt.Sprintf("inference error: %v", err), http.StatusBadGateway)
-            return
-        }
-        defer resp.Body.Close()
-        for key, values := range resp.Header {
-            if key == "Content-Length" { continue }
-            for _, value := range values { w.Header().Add(key, value) }
-        }
-        w.WriteHeader(resp.StatusCode)
-        if _, err := io.Copy(w, resp.Body); err != nil { return }
-        _ = req.Stream // stream responses are forwarded unchanged, including SSE.
-    })
+	// Chat completions — proxy to llama-server.
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("read request: %v", err), http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
+			return
+		}
+		proxyURL := fmt.Sprintf("%s/v1/chat/completions", strings.TrimRight(inferenceURL, "/"))
+		proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, proxyURL, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("proxy request: %v", err), http.StatusBadGateway)
+			return
+		}
+		proxyReq.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 10 * time.Minute}
+		resp, err := client.Do(proxyReq)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("inference error: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for key, values := range resp.Header {
+			if key == "Content-Length" {
+				continue
+			}
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			return
+		}
+		_ = req.Stream // stream responses are forwarded unchanged, including SSE.
+	})
 
 	// Ollama-compatible tags endpoint
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
