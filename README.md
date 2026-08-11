@@ -16,8 +16,8 @@ Unbound is a desktop/local CLI tool that downloads, hosts, and runs open-source 
 ## Quick Start
 
 ```bash
-# Install (coming soon)
-curl -fsSL https://get.unbound.sh | sh
+# Install with one command
+curl -fsSL https://raw.githubusercontent.com/k0u3h1k/bare-metal/main/scripts/install.sh | sh
 
 # Download and run a model
 unbound run llama3.2:1b
