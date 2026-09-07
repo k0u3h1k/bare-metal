@@ -1,9 +1,7 @@
 package server
 
 import (
-	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,71 +9,131 @@ import (
 	"testing"
 )
 
-func testServer(t *testing.T, upstream http.Handler) (*httptest.Server, *httptest.Server) {
-	t.Helper()
-	up := httptest.NewServer(upstream)
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	api.Close()
-	// Start's listener cannot be injected; exercise handlers through a local equivalent by proxying URL.
-	_ = up
-	return up, nil
-}
-func TestProxyHandlerContract(t *testing.T) {
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "{\"echo\":%s}", b)
-	}))
-	defer up.Close()
-	// Build the same mux contract without binding a fixed port.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		req, _ := http.NewRequestWithContext(r.Context(), "POST", up.URL+"/v1/chat/completions", strings.NewReader(string(body)))
-		resp, e := http.DefaultClient.Do(req)
-		if e != nil {
-			http.Error(w, e.Error(), 502)
-			return
+func TestChatCompletionsProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path = %q", r.URL.Path)
 		}
-		defer resp.Body.Close()
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "messages") {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
-	}
-}
-func TestStreamingSSE(t *testing.T) {
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		f := w.(http.Flusher)
-		fmt.Fprintln(w, "data: one")
-		f.Flush()
-		fmt.Fprintln(w, "data: two")
-		f.Flush()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"proxied","echo":` + string(body) + `}`))
 	}))
-	defer up.Close()
-	resp, e := http.Post(up.URL, "application/json", strings.NewReader(`{"stream":true}`))
-	if e != nil {
-		t.Fatal(e)
+	defer upstream.Close()
+
+	api := httptest.NewServer(NewHandler("test-model", upstream.URL))
+	defer api.Close()
+
+	resp, err := http.Post(api.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	sc := bufio.NewScanner(resp.Body)
-	var got []string
-	for sc.Scan() {
-		got = append(got, sc.Text())
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(got) < 2 {
-		t.Fatalf("events=%v", got)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"id":"proxied"`) {
+		t.Fatalf("unexpected proxied body: %s", body)
 	}
 }
-func TestHealthJSON(t *testing.T) {
-	h := httptest.NewRecorder()
-	json.NewEncoder(h).Encode(map[string]string{"status": "ok", "model": "test"})
-	if !strings.Contains(h.Body.String(), "ok") {
-		t.Fatal("missing status")
+
+func TestStreamingChatCompletionsProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream does not support flushing")
+		}
+		_, _ = io.WriteString(w, "data: one\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "data: two\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	api := httptest.NewServer(NewHandler("test-model", upstream.URL))
+	defer api.Close()
+
+	resp, err := http.Post(api.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"stream":true,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("content type = %q", got)
+	}
+	if string(body) != "data: one\n\ndata: two\n\n" {
+		t.Fatalf("stream body = %q", body)
+	}
+}
+
+func TestHealthAndModels(t *testing.T) {
+	api := httptest.NewServer(NewHandler("test-model", "http://127.0.0.1:1"))
+	defer api.Close()
+
+	t.Run("health", func(t *testing.T) {
+		resp, err := http.Get(api.URL + "/health")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var got map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK || got["status"] != "ok" || got["model"] != "test-model" {
+			t.Fatalf("status = %d, body = %#v", resp.StatusCode, got)
+		}
+	})
+
+	t.Run("models", func(t *testing.T) {
+		resp, err := http.Get(api.URL + "/v1/models")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var got struct {
+			Object string      `json:"object"`
+			Data   []ModelInfo `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK || got.Object != "list" || len(got.Data) != 1 || got.Data[0].ID != "test-model" {
+			t.Fatalf("status = %d, body = %#v", resp.StatusCode, got)
+		}
+	})
+}
+
+func TestChatCompletionsUpstreamDown(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	upstreamURL := upstream.URL
+	upstream.Close()
+
+	api := httptest.NewServer(NewHandler("test-model", upstreamURL))
+	defer api.Close()
+	resp, err := http.Post(api.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
 	}
 }
