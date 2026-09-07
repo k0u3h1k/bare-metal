@@ -3,6 +3,10 @@ package run
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/k0u3h1k/bare-metal/pkg/llama"
 
 	"github.com/k0u3h1k/bare-metal/pkg/console"
 	"github.com/k0u3h1k/bare-metal/pkg/model"
@@ -26,7 +30,7 @@ Examples:
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		modelName := args[0]
-		noPerms, _ := cmd.Flags().GetBool("no-permissions")
+		autoApprove, _ := cmd.Flags().GetBool("auto-approve")
 		systemPrompt, _ := cmd.Flags().GetString("system-prompt")
 		maxTokens, _ := cmd.Flags().GetInt("max-tokens")
 		port, _ := cmd.Flags().GetInt("port")
@@ -38,7 +42,11 @@ Examples:
 		// Load the model (download if needed, start llama-server)
 		loadPort := port
 		if loadPort == 0 {
-			loadPort = 8080
+			var portErr error
+			loadPort, portErr = llama.FreePort()
+			if portErr != nil {
+				return fmt.Errorf("selecting llama port: %w", portErr)
+			}
 		}
 
 		if err := mgr.Load(modelName, loadPort); err != nil {
@@ -52,15 +60,23 @@ Examples:
 			return fmt.Errorf("inference server not available")
 		}
 
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(stop)
+		go func() { <-stop; _ = mgr.Unload(modelName); os.Exit(0) }()
 		fmt.Printf("💬 Starting interactive chat (inference at %s)\n", inferenceURL)
-		if noPerms {
-			fmt.Println("🔓 Running with permissions enabled (--no-permissions)")
+		if autoApprove {
+			fmt.Println("🔓 Auto-approving all permission requests (--auto-approve)")
 			previous, existed := os.LookupEnv("UNBOUND_ALLOW_ALL")
 			if err := os.Setenv("UNBOUND_ALLOW_ALL", "1"); err != nil {
 				return fmt.Errorf("enabling unrestricted mode: %w", err)
 			}
 			defer func() {
-				if existed { _ = os.Setenv("UNBOUND_ALLOW_ALL", previous) } else { _ = os.Unsetenv("UNBOUND_ALLOW_ALL") }
+				if existed {
+					_ = os.Setenv("UNBOUND_ALLOW_ALL", previous)
+				} else {
+					_ = os.Unsetenv("UNBOUND_ALLOW_ALL")
+				}
 			}()
 		}
 		if systemPrompt != "" {
@@ -81,8 +97,8 @@ Examples:
 }
 
 func init() {
-	Cmd.Flags().BoolP("no-permissions", "n", false, "Run in sandboxed mode (no permissions)")
+	Cmd.Flags().BoolP("auto-approve", "a", false, "Skip permission prompts (auto-approve all actions for this session)")
 	Cmd.Flags().StringP("system-prompt", "s", "", "Custom system prompt for the model")
 	Cmd.Flags().IntP("max-tokens", "m", 2048, "Maximum tokens per response")
-	Cmd.Flags().IntP("port", "p", 0, "Port for llama-server (default: 8080)")
+	Cmd.Flags().IntP("port", "p", 0, "Port for llama-server (default: 0 = auto-select)")
 }
