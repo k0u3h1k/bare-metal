@@ -2,11 +2,11 @@ package serve
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/k0u3h1k/bare-metal/pkg/llama"
 	"github.com/k0u3h1k/bare-metal/pkg/model"
 	"github.com/k0u3h1k/bare-metal/pkg/server"
 	"github.com/spf13/cobra"
@@ -14,8 +14,9 @@ import (
 
 // Cmd represents the `unbound serve` command.
 var Cmd = &cobra.Command{
-	Use: "serve <model-name>", Short: "Start a model with an OpenAI-compatible API",
-	Args: cobra.ExactArgs(1),
+	Use:   "serve <model-name>",
+	Short: "Start a model with an OpenAI-compatible API",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		modelName := args[0]
 		apiPort, _ := cmd.Flags().GetInt("port")
@@ -23,7 +24,7 @@ var Cmd = &cobra.Command{
 		host, _ := cmd.Flags().GetString("host")
 		if llamaPort == 0 {
 			var err error
-			llamaPort, err = freePort()
+			llamaPort, err = llama.FreePort()
 			if err != nil {
 				return fmt.Errorf("selecting llama port: %w", err)
 			}
@@ -43,18 +44,13 @@ var Cmd = &cobra.Command{
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 		defer signal.Stop(stop)
-		go func() { <-stop; _ = mgr.Unload(modelName); os.Exit(0) }()
+		go func() {
+			<-stop
+			_ = mgr.Unload(modelName)
+			os.Exit(0)
+		}()
 		return server.Start(modelName, host, apiPort, inferenceURL)
 	},
-}
-
-func freePort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
 func init() {

@@ -56,36 +56,34 @@ type ModelInfo struct {
 	OwnedBy string `json:"owned_by"`
 }
 
-// Start launches the OpenAI-compatible API server.
-// Proxies requests to the running llama-server instance.
-func Start(modelName string, host string, port int, inferenceURL string) error {
-	addr := fmt.Sprintf("%s:%d", host, port)
-
-	// If inference URL is not provided, default to local llama-server
+// NewHandler builds the OpenAI-compatible API handler. It is separated from
+// Start so callers and tests can mount the API without binding a fixed port.
+func NewHandler(modelName, inferenceURL string) http.Handler {
 	if inferenceURL == "" {
-		inferenceURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+		inferenceURL = "http://127.0.0.1:8080"
 	}
+	inferenceURL = strings.TrimRight(inferenceURL, "/")
 
 	mux := http.NewServeMux()
-
-	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "model": modelName})
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok", "model": modelName}); err != nil {
+			return
+		}
 	})
-
-	// List models
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"object": "list",
-			"data": []ModelInfo{
-				{ID: modelName, Object: "model", OwnedBy: "unbound"},
-			},
+			"data":   []ModelInfo{{ID: modelName, Object: "model", OwnedBy: "unbound"}},
 		})
 	})
-
-	// Chat completions — proxy to llama-server.
+	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"models": []ModelInfo{{ID: modelName, Object: "model", OwnedBy: "unbound"}},
+		})
+	})
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -96,22 +94,24 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 			http.Error(w, fmt.Sprintf("read request: %v", err), http.StatusBadRequest)
 			return
 		}
-		var req struct {
+		var request struct {
 			Stream bool `json:"stream"`
 		}
-		if err := json.Unmarshal(body, &req); err != nil {
+		if err := json.Unmarshal(body, &request); err != nil {
 			http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
 			return
 		}
-		proxyURL := fmt.Sprintf("%s/v1/chat/completions", strings.TrimRight(inferenceURL, "/"))
-		proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, proxyURL, bytes.NewReader(body))
+		proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+			inferenceURL+"/v1/chat/completions", bytes.NewReader(body))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("proxy request: %v", err), http.StatusBadGateway)
 			return
 		}
-		proxyReq.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 10 * time.Minute}
-		resp, err := client.Do(proxyReq)
+		proxyReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+		if proxyReq.Header.Get("Content-Type") == "" {
+			proxyReq.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(proxyReq)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("inference error: %v", err), http.StatusBadGateway)
 			return
@@ -126,22 +126,39 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		if _, err := io.Copy(w, resp.Body); err != nil {
+
+		if !request.Stream {
+			_, _ = io.Copy(w, resp.Body)
 			return
 		}
-		_ = req.Stream // stream responses are forwarded unchanged, including SSE.
+		controller := http.NewResponseController(w)
+		// Flush headers before reading the first event so clients can begin
+		// consuming an SSE response immediately.
+		_ = controller.Flush()
+		buffer := make([]byte, 32*1024)
+		for {
+			n, readErr := resp.Body.Read(buffer)
+			if n > 0 {
+				if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+					return
+				}
+				_ = controller.Flush()
+			}
+			if readErr != nil {
+				return
+			}
+		}
 	})
+	return mux
+}
 
-	// Ollama-compatible tags endpoint
-	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"models": []ModelInfo{
-				{ID: modelName, Object: "model", OwnedBy: "unbound"},
-			},
-		})
-	})
-
+// Start launches the OpenAI-compatible API server.
+// Proxies requests to the running llama-server instance.
+func Start(modelName string, host string, port int, inferenceURL string) error {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	if inferenceURL == "" {
+		inferenceURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	}
 	fmt.Printf("🌐 Unbound API server listening on %s\n", addr)
 	fmt.Println("📋 Endpoints:")
 	fmt.Println("   GET  /health                - Health check")
@@ -149,8 +166,7 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 	fmt.Println("   POST /v1/chat/completions   - Chat completion (proxied)")
 	fmt.Println("   GET  /api/tags              - Ollama-compatible model list")
 	fmt.Printf("📎 Proxying inference to: %s\n", inferenceURL)
-
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, NewHandler(modelName, inferenceURL)); err != nil {
 		return fmt.Errorf("server error: %w", err)
 	}
 	return nil
