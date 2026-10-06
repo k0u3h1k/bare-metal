@@ -109,10 +109,10 @@ func Start(modelName string, host string, port int, inferenceURL string) error {
 		// Build proxy request to llama-server
 		proxyURL := fmt.Sprintf("%s/v1/chat/completions", inferenceURL)
 		proxyBody, err := json.Marshal(req)
-                if err != nil {
-                        http.Error(w, fmt.Sprintf("encode request: %v", err), http.StatusInternalServerError)
-                        return
-                }
+		if err != nil {
+			http.Error(w, fmt.Sprintf("encode request: %v", err), http.StatusInternalServerError)
+			return
+		}
 
 		if req.Stream {
 			// Streaming: use SSE
