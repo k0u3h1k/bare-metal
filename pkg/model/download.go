@@ -233,6 +233,12 @@ func (m *Manager) downloadWithProgress(url string, manifest *Manifest) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, numChunks)
 
+	// Ensure the model directory exists (downloadWithProgress may be called
+	// directly, e.g. from tests, without DownloadFile's setup).
+	if err := os.MkdirAll(filepath.Dir(partPath), 0755); err != nil {
+		return fmt.Errorf("creating model directory: %w", err)
+	}
+
 	// Open the partial file for writing at offsets
 	partFile, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
