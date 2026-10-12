@@ -33,15 +33,24 @@ type Manager struct {
 }
 
 // NewManager creates a new model manager.
+// If config.App is nil (e.g., in tests or library use), defaults to ~/.unbound.
 func NewManager() *Manager {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
 	}
 	dataDir := filepath.Join(home, ".unbound")
+	cacheDir := dataDir + "/models"
+	if config.App != nil && config.App.ModelDir != "" {
+		cacheDir = config.App.ModelDir
+	}
+	binDir := filepath.Join(dataDir, "bin")
+	if config.App != nil && config.App.DataDir != "" {
+		binDir = filepath.Join(config.App.DataDir, "bin")
+	}
 	return &Manager{
-		cacheDir: config.App.ModelDir,
-		binDir:   filepath.Join(dataDir, "bin"),
+		cacheDir: cacheDir,
+		binDir:   binDir,
 	}
 }
 
@@ -190,7 +199,11 @@ func (m *Manager) Load(name string, port int) error {
 	if port > 0 {
 		server.Port = port
 	} else {
-		server.Port = 8080 // default
+		freePort, err := llama.FreePort()
+		if err != nil {
+			return fmt.Errorf("finding free port: %w", err)
+		}
+		server.Port = freePort
 	}
 
 	fmt.Printf("📂 Model file: %s\n", modelPath)
