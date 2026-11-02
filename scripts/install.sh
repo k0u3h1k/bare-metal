@@ -3,15 +3,15 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/k0u3h1k/bare-metal/main/scripts/install.sh | sh
 set -eu
 
-VERSION="v0.1.0"
+VERSION="v0.2.0"
 REPO="k0u3h1k/bare-metal"
 BIN="unbound"
 BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 
 # checksums
-SUM_LINUX_AMD64="7a7f8688ad4fc7e59ecf87e0935444af5224af5297c9d159ed0145fd983cb475"
-SUM_DARWIN_AMD64="2a07cf7cb14f4138081446d2202002acafbb4dde0a84bb9142522968113a1792"
-SUM_DARWIN_ARM64="edc16f66a47f00d223f9a0bf4fe9d87f10f2d0632e0de31e63a2820bc0063133"
+SUM_LINUX_AMD64="aa8cadabfa648f481dc2ef6c71f52ab244179737feb7d732e9ff523ef68ab439"
+SUM_DARWIN_AMD64="a0adab3763213537a2f34a59475cc3b3095028984877a6d33a4e9a932a66ece7"
+SUM_DARWIN_ARM64="cd56988cf671ad31d39d49375cc027bda62a088a401dd5890ed8fb9d731dd905"
 
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; C='\033[0;36m'; B='\033[1m'; N='\033[0m'
 
